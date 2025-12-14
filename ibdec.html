@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>Firebase Multiplayer Oyun</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #222; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        canvas { display: block; background: #333; }
+        
+        /* Sağ Üst Bildirim Alanı */
+        #notification-area {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            color: white;
+            font-weight: bold;
+            background: rgba(0, 128, 0, 0.8);
+            padding: 10px 20px;
+            border-radius: 5px;
+            display: none; /* Başlangıçta gizli */
+            animation: fadein 0.5s;
+        }
+
+        /* Sağ Alt Sohbet Alanı */
+        #chat-container {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 300px;
+            height: 250px;
+            background: rgba(0, 0, 0, 0.8);
+            border: 1px solid #555;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px;
+            color: white;
+            font-size: 14px;
+        }
+
+        #messages div { margin-bottom: 5px; }
+        .system-msg { color: #aaa; font-style: italic; }
+        .my-msg { color: #4facfe; }
+        .their-msg { color: #00f2fe; }
+
+        #chat-input-area {
+            display: flex;
+            border-top: 1px solid #555;
+        }
+
+        #msg-input {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            outline: none;
+            background: transparent;
+            color: white;
+        }
+
+        #send-btn {
+            padding: 0 15px;
+            background: #4facfe;
+            border: none;
+            color: white;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        
+        @keyframes fadein { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="notification-area"></div>
+
+    <div id="chat-container">
+        <div id="messages">
+            <div class="system-msg">Sohbete hoş geldin!</div>
+        </div>
+        <div id="chat-input-area">
+            <input type="text" id="msg-input" placeholder="Mesaj yaz..." autocomplete="off">
+            <button id="send-btn">GÖNDER</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+        import { getDatabase, ref, set, onValue, onDisconnect, push, onChildAdded, remove, get } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-database.js";
+
+        // Senin verdiğin konfigürasyon
+        const firebaseConfig = {
+            apiKey: "AIzaSyA49KR-d9hN6QXXcvZ68CfYLpMulad8p50",
+            authDomain: "multiplayer-chat-552f7.firebaseapp.com",
+            databaseURL: "https://multiplayer-chat-552f7-default-rtdb.europe-west1.firebasedatabase.app",
+            projectId: "multiplayer-chat-552f7",
+            storageBucket: "multiplayer-chat-552f7.firebasestorage.app",
+            messagingSenderId: "658594907764",
+            appId: "1:658594907764:web:18ca661bd9dd9f504df321",
+            measurementId: "G-9JMN9DMG82"
+        };
+
+        // Firebase Başlatma
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        // Oyun Değişkenleri
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        let myId = null;
+        let myName = "İsimsiz";
+        let players = {};
+        
+        // Canvas Boyutlandırma
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // ------------------------------------------------
+        // 1. OYUNCU GİRİŞ MANTIĞI (Oyuncu1 / Oyuncu2)
+        // ------------------------------------------------
+        const playersRef = ref(db, 'players');
+        
+        // Önce mevcut oyuncu sayısını kontrol et ve isim ver
+        get(playersRef).then((snapshot) => {
+            const currentPlayers = snapshot.val() || {};
+            const count = Object.keys(currentPlayers).length;
+
+            if (count === 0) {
+                myName = "Oyuncu1";
+            } else if (count === 1) {
+                // Eğer zaten bir kişi varsa, ben ikincisiyim
+                // İlk kişinin kim olduğunu kontrol etmemize gerek yok, basit mantıkla Oyuncu2 diyoruz.
+                // Eğer daha sağlam bir mantık istersen ID kontrolü gerekir ama şimdilik yeterli.
+                const firstPlayerKey = Object.keys(currentPlayers)[0];
+                if(currentPlayers[firstPlayerKey].name === "Oyuncu1") {
+                    myName = "Oyuncu2";
+                } else {
+                    myName = "Oyuncu1"; // Nadir durum
+                }
+            } else {
+                myName = `Seyirci${count + 1}`; // 2 kişiden fazla girerse
+            }
+
+            joinGame();
+        });
+
+        function joinGame() {
+            // Yeni oyuncu referansı oluştur
+            const newPlayerRef = push(playersRef);
+            myId = newPlayerRef.key;
+
+            // Başlangıç konumu (rastgele)
+            const startX = Math.floor(Math.random() * (canvas.width - 50));
+            const startY = Math.floor(Math.random() * (canvas.height - 50));
+            const color = myName === "Oyuncu1" ? "#ff4757" : "#2ed573"; // Oyuncu1 Kırmızı, Oyuncu2 Yeşil
+
+            // Veritabanına yaz
+            set(newPlayerRef, {
+                id: myId,
+                name: myName,
+                x: startX,
+                y: startY,
+                color: color
+            });
+
+            // Çıkış yapınca silinsin
+            onDisconnect(newPlayerRef).remove();
+
+            setupGameListeners();
+            setupChat();
+        }
+
+        // ------------------------------------------------
+        // 2. OYUN DÖNGÜSÜ VE ÇİZİM
+        // ------------------------------------------------
+        function setupGameListeners() {
+            // Oyuncuları dinle
+            onValue(playersRef, (snapshot) => {
+                players = snapshot.val() || {};
+            });
+
+            // "Oyuncu2 oyuna katıldı" Bildirimi İçin
+            onChildAdded(playersRef, (snapshot) => {
+                const newPlayer = snapshot.val();
+                if (newPlayer.id !== myId && newPlayer.name === "Oyuncu2") {
+                    showNotification("Oyuncu2 oyuna katıldı!");
+                }
+            });
+
+            gameLoop();
+        }
+
+        function gameLoop() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Tüm oyuncuları çiz
+            Object.keys(players).forEach((key) => {
+                const p = players[key];
+                ctx.fillStyle = p.color;
+                ctx.fillRect(p.x, p.y, 40, 40); // Oyuncu karesi
+
+                // İsim yazısı
+                ctx.fillStyle = "white";
+                ctx.font = "14px Arial";
+                ctx.fillText(p.name, p.x, p.y - 10);
+            });
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // ------------------------------------------------
+        // 3. HAREKET KONTROLÜ (WASD)
+        // ------------------------------------------------
+        document.addEventListener('keydown', (e) => {
+            if (!myId || document.activeElement === document.getElementById('msg-input')) return; // Chat yazarken hareket etme
+
+            let dx = 0;
+            let dy = 0;
+            const speed = 10;
+
+            if (e.key === 'w' || e.key === 'W') dy = -speed;
+            if (e.key === 's' || e.key === 'S') dy = speed;
+            if (e.key === 'a' || e.key === 'A') dx = -speed;
+            if (e.key === 'd' || e.key === 'D') dx = speed;
+
+            if (dx !== 0 || dy !== 0) {
+                const myRef = ref(db, `players/${myId}`);
+                // Mevcut konumu alıp güncellememiz lazım, ama hızlı olması için local state kullanmadan direkt yazabiliriz
+                // Ancak senkronizasyon için en doğrusu mevcut state'i okumaktır.
+                // Basitlik adına players objesinden okuyup güncelliyoruz:
+                if (players[myId]) {
+                    set(myRef, {
+                        ...players[myId],
+                        x: players[myId].x + dx,
+                        y: players[myId].y + dy
+                    });
+                }
+            }
+        });
+
+        // ------------------------------------------------
+        // 4. SOHBET SİSTEMİ
+        // ------------------------------------------------
+        function setupChat() {
+            const chatRef = ref(db, 'messages');
+            const msgInput = document.getElementById('msg-input');
+            const sendBtn = document.getElementById('send-btn');
+            const messagesDiv = document.getElementById('messages');
+
+            // Mesaj Gönderme
+            function sendMessage() {
+                const text = msgInput.value;
+                if (text.trim() === "") return;
+
+                push(chatRef, {
+                    name: myName,
+                    text: text,
+                    timestamp: Date.now()
+                });
+
+                msgInput.value = "";
+            }
+
+            sendBtn.addEventListener('click', sendMessage);
+            msgInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') sendMessage();
+            });
+
+            // Mesajları Dinleme
+            onChildAdded(chatRef, (snapshot) => {
+                const data = snapshot.val();
+                const msgDiv = document.createElement('div');
+                
+                // Mesaj stili (ben mi o mu)
+                if (data.name === myName) {
+                    msgDiv.className = "my-msg";
+                    msgDiv.textContent = `Ben: ${data.text}`;
+                } else {
+                    msgDiv.className = "their-msg";
+                    msgDiv.textContent = `${data.name}: ${data.text}`;
+                }
+
+                messagesDiv.appendChild(msgDiv);
+                messagesDiv.scrollTop = messagesDiv.scrollHeight; // En alta kaydır
+            });
+        }
+
+        // ------------------------------------------------
+        // YARDIMCI FONKSİYONLAR
+        // ------------------------------------------------
+        function showNotification(text) {
+            const notif = document.getElementById('notification-area');
+            notif.innerText = text;
+            notif.style.display = 'block';
+            
+            // 3 saniye sonra kaybolsun
+            setTimeout(() => {
+                notif.style.display = 'none';
+            }, 3000);
+        }
+
+    </script>
+</body>
+</html>
